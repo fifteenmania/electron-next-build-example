@@ -14,8 +14,8 @@ if (isProd) {
 
 function createWindow() {
   const win = new BrowserWindow({
-    width: 100,
-    height: 600,
+    width: 1000,
+    height: 800,
     webPreferences: {
       nodeIntegration: true,
     },

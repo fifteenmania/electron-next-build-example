@@ -1,11 +1,12 @@
 import { ExecaChildProcess, Options, execa } from "execa";
-import { rmdirSync } from "fs";
+import { existsSync, fstat, fsync, rmdirSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import webpack from "webpack";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const rendererPort = 8080;
 
 class WebpackManager {
   watching: webpack.Watching | null = null;
@@ -14,9 +15,16 @@ class WebpackManager {
     this.mainProcessManager = mainProcessManager;
   }
 
+  checkPreviousBuild() {
+    const filepath = path.join(process.cwd(), "app");
+    return existsSync(filepath);
+  }
+
   clearPreviousBuild() {
     // clear previous build
-    rmdirSync(path.join(process.cwd(), "app"), { recursive: true });
+    if (this.checkPreviousBuild()) {
+      rmdirSync(path.join(process.cwd(), "app"), { recursive: true });
+    }
   }
 
   start() {
@@ -55,6 +63,9 @@ class WebpackManager {
       }
       console.log(stats.toString());
     });
+    watching.compiler.hooks.emit.tap("EmitPlugin", () => {
+      this.mainProcessManager.restart();
+    });
     this.watching = watching;
   }
 
@@ -75,25 +86,33 @@ class WebpackManager {
   }
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 class MainProcessManager {
   mainProcess: ExecaChildProcess | null = null;
   constructor() {}
   start() {
-    const mainProcess = execa("electron", ["."], {
+    const mainProcess = execa("electron", [".", `${rendererPort}`, '--remote-debugging-port=5858', '--inspect=9292'], {
       cwd: process.cwd(),
       stdio: "inherit",
+      detached: true,
     });
     this.mainProcess = mainProcess;
     return mainProcess;
   }
 
   terminate(): Promise<void> {
+    const mainProcess = this.mainProcess;
     return new Promise((resolve, reject) => {
-      if (this.mainProcess) {
-        this.mainProcess.on("exit", () => {
+      if (mainProcess && mainProcess.pid && !mainProcess.killed) {
+        mainProcess.on("exit", () => {
           resolve();
         });
-        this.mainProcess.kill();
+        mainProcess.kill();
       } else {
         resolve();
       }
@@ -102,12 +121,26 @@ class MainProcessManager {
 
   async restart() {
     await this.terminate()
+    await sleep(1000)
     return this.start()
   }
 }
 
 class RendererManager {
+  rendererProcess: ExecaChildProcess | null = null;
+  constructor() {}
 
+  start() {
+    const rendererProcess = execa("next", ["-p", rendererPort.toString(), 'renderer'], execaOptions);
+    this.rendererProcess = rendererProcess;
+    return rendererProcess;  
+  }
+
+  terminate() {
+    if (this.rendererProcess) {
+      this.rendererProcess.kill();
+    }
+  }
 }
 
 const execaOptions: Options = {
@@ -117,15 +150,19 @@ const execaOptions: Options = {
 
 const mainProcessManager = new MainProcessManager();
 const webpackManager = new WebpackManager(mainProcessManager);
+const rendererManager = new RendererManager();
 webpackManager.start();
+rendererManager.start();
 
 process.on("SIGINT", () => {
   webpackManager.terminate();
   mainProcessManager.terminate();
+  rendererManager.terminate();
   process.exit(0);
 });
 process.on("SIGTERM", () => {
   webpackManager.terminate();
   mainProcessManager.terminate();
+  rendererManager.terminate();
   process.exit(0);
 });
